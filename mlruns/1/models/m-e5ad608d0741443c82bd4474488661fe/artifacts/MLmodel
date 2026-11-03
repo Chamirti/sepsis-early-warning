@@ -1,0 +1,24 @@
+artifact_path: file:C:/Users/chami/sepsis-early-warning/mlruns/1/models/m-e5ad608d0741443c82bd4474488661fe/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.skops
+    predict_fn: predict
+    python_version: 3.12.10
+  sklearn:
+    code: null
+    pickled_model: model.skops
+    serialization_format: skops
+    sklearn_version: 1.9.1
+    skops_trusted_types:
+    - numpy.dtype
+mlflow_version: 3.17.2
+model_id: m-e5ad608d0741443c82bd4474488661fe
+model_size_bytes: 91021
+model_uuid: m-e5ad608d0741443c82bd4474488661fe
+prompts: null
+run_id: fb7d76d1fef04b2aada53c5445496190
+utc_time_created: '2026-11-03 03:03:55.209558'

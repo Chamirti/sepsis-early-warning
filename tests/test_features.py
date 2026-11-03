@@ -45,3 +45,12 @@ def test_features_use_only_past_data():
         row_full = full[full["ICULOS"] == cutoff].reset_index(drop=True)
         row_partial = partial[partial["ICULOS"] == cutoff].reset_index(drop=True)
         pd.testing.assert_frame_equal(row_full, row_partial, check_dtype=False)
+
+def test_no_feature_acts_as_a_clock():
+    """A long stay where labs are measured only once must not produce growing 'hours since' values."""
+    df = synthetic_patient(n_hours=200, seed=1)
+    for c in LAB_FEATS:
+        df[c] = pd.array([5.0] + [np.nan] * 199, dtype="Float64")   # measured once, at the start
+    out = compute_features(df)
+    since_cols = [c for c in out.columns if c.endswith("_hrs_since")]
+    assert (out[since_cols].max() <= 24).all(), out[since_cols].max().sort_values().tail()

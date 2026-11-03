@@ -1,0 +1,27 @@
+artifact_path: file:C:/Users/chami/sepsis-early-warning/mlruns/1/models/m-82a630c553194073b72da37b23b8adbc/artifacts
+flavors:
+  lightgbm:
+    code: null
+    data: model.skops
+    lgb_version: 4.7.0
+    model_class: lightgbm.sklearn.LGBMClassifier
+    serialization_format: skops
+    skops_trusted_types:
+    - collections.OrderedDict
+    - lightgbm.sklearn.LGBMRegressor
+    - lightgbm.sklearn.LGBMClassifier
+    - lightgbm.basic.Booster
+  python_function:
+    data: model.skops
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.lightgbm
+    python_version: 3.12.10
+mlflow_version: 3.17.2
+model_id: m-82a630c553194073b72da37b23b8adbc
+model_size_bytes: 2062141
+model_uuid: m-82a630c553194073b72da37b23b8adbc
+prompts: null
+run_id: 4d78267d3c0b41f6be95edbd07fe75f4
+utc_time_created: '2026-11-03 03:05:07.444764'

@@ -48,12 +48,12 @@ def feature_sql(source: str, keep=("hospital", "split", "SepsisLabel")) -> str:
             f"AVG({v}) OVER w24 AS {v}_mean24",
             f"COUNT({v}) OVER w6 AS {v}_n6",
             f"LAST_VALUE({v} IGNORE NULLS) OVER wall AS {v}_last",
-            f"ICULOS - LAST_VALUE(CASE WHEN {v} IS NOT NULL THEN ICULOS END IGNORE NULLS) OVER wall AS {v}_hrs_since",
+            f"ICULOS - LAST_VALUE(CASE WHEN {v} IS NOT NULL THEN ICULOS END IGNORE NULLS) OVER wall AS {v}_hrs_since_raw",
         ]
     for l in LAB_FEATS:
         agg += [
             f"LAST_VALUE({l} IGNORE NULLS) OVER wall AS {l}_last",
-            f"ICULOS - LAST_VALUE(CASE WHEN {l} IS NOT NULL THEN ICULOS END IGNORE NULLS) OVER wall AS {l}_hrs_since",
+            f"ICULOS - LAST_VALUE(CASE WHEN {l} IS NOT NULL THEN ICULOS END IGNORE NULLS) OVER wall AS {l}_hrs_since_raw",
             f"FIRST_VALUE({l} IGNORE NULLS) OVER w24 AS {l}_first24",
             f"COUNT({l}) OVER w24 AS {l}_n24",
         ]
@@ -68,10 +68,13 @@ def feature_sql(source: str, keep=("hospital", "split", "SepsisLabel")) -> str:
     out = ["patient_id", "ICULOS"] + keep + STATIC
     for v in VITAL_FEATS:
         out += [f"{v}_mean6", f"{v}_min6", f"{v}_max6", f"{v}_mean24", f"{v}_n6",
-                f"{v}_last", f"{v}_hrs_since",
+                f"{v}_last",
+                f"CASE WHEN {v}_hrs_since_raw > 24 THEN 24 ELSE {v}_hrs_since_raw END AS {v}_hrs_since",
                 f"{v}_mean6 - {v}_mean24 AS {v}_delta6_24"]
     for l in LAB_FEATS:
-        out += [f"{l}_last", f"{l}_hrs_since", f"{l}_n24",
+        out += [f"{l}_last",
+                f"CASE WHEN {l}_hrs_since_raw > 24 THEN 24 ELSE {l}_hrs_since_raw END AS {l}_hrs_since",
+                f"{l}_n24",
                 f"{l}_last - {l}_first24 AS {l}_change24"]
     out += [
         "HR_last / NULLIF(SBP_last, 0) AS shock_index",
