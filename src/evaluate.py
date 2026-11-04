@@ -64,11 +64,11 @@ def alert_metrics(df, threshold, silence_hours=SILENCE_HOURS, window=EARLY_WINDO
     patient_days = len(df) / 24
     return {
         "threshold": threshold,
-        "early_sensitivity": len(first_early) / n_septic,
+        "early_sensitivity": len(first_early) / n_septic if n_septic else np.nan,
         "median_lead_h": float(lead.median()) if len(lead) else np.nan,
         "alerts_per_100_patient_days": 100 * len(a) / patient_days,
         "alert_ppv": float(in_window.mean()) if len(a) else np.nan,
-        "nonseptic_patients_alerted": a.loc[a["septic"] == 0, "patient_id"].nunique() / n_nonseptic,
+        "nonseptic_patients_alerted": (a.loc[a["septic"] == 0, "patient_id"].nunique() / n_nonseptic if n_nonseptic else np.nan),
     }
 
 

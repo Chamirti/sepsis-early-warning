@@ -2,12 +2,13 @@
 
 Predicting sepsis hours before onset from hourly ICU data, with external validation on a second hospital.
 
-*Work in progress: data pipeline, features and models complete; test-set evaluation, external validation and deployment in progress.*
+*Work in progress: data pipeline, models and Hospital A test-set evaluation complete; external validation (Hospital B) and deployment in progress.*
 
 ## Highlights
 - **40,336 ICU patients** from two hospitals; reproducible pipeline: DuckDB SQL cohort and 148 point-in-time features, LightGBM, MLflow tracking, automated leakage tests.
+- **Held-out test set (Hospital A):** AUROC 0.805 (95% CI 0.782–0.827). At the chosen threshold, the model warns **49% of septic patients a median 8 hours before onset**, with about 8 alerts per true early warning.
 - **Found and removed two shortcuts** created by how the dataset was assembled: ICU length of stay (would inflate validation AUPRC by ~29%) and a hidden proxy for it in "hours since last measured" features, found through SHAP error analysis.
-- **Hospital B held out entirely** for external validation.
+- **Honest evaluation:** pre-onset performance reported separately from post-onset; subgroup results and an early-stay limitation reported; Hospital B held out entirely for external validation.
 
 ## Data
 PhysioNet/Computing in Cardiology Challenge 2019 (v1.0.0): hourly ICU vitals, labs and demographics for 40,336 patients from two hospital systems (A: 20,336; B: 20,000). SepsisLabel follows Sepsis-3 and turns on 6 hours before onset.
@@ -60,7 +61,7 @@ PhysioNet/Computing in Cardiology Challenge 2019 (v1.0.0): hourly ICU vitals, la
 
 ## Models and results
 - **Logistic regression** (median imputation, standardization) as a baseline; **LightGBM** as the main model (learning rate 0.03, 63 leaves, min 200 samples per leaf, row/feature subsampling, early stopping on validation AUPRC).
-- Trained on Hospital A train; validation used for early stopping and model comparison; test and Hospital B untouched until final evaluation.
+- Trained on Hospital A train; validation used for early stopping, model comparison and threshold selection; test and Hospital B untouched until final evaluation.
 - Unweighted training; every run tracked in MLflow (parameters, metrics, model, feature list).
 
 **Validation results and ablations (Hospital A)**
@@ -74,8 +75,12 @@ PhysioNet/Computing in Cardiology Challenge 2019 (v1.0.0): hourly ICU vitals, la
 | Random (positive rate) | 0.5 | 0.019 |
 - ICULOS would inflate AUPRC by ~29% (0.083 → 0.106) via the record-length artifact; excluded.
 - Ordering features add ~8% AUPRC (down from ~14% before the hours-since fix; part of their apparent value was the hidden clock).
-- Class weighting: no meaningful difference in discrimination; kept unweighted for calibration (van den Goorbergh et al., 2022; Carriero et al., 2024).
-- Differences of ~0.01 AUPRC may be noise (238 septic validation patients); confidence intervals are part of the test-set evaluation (in progress).
+- Class weighting gave no meaningful gain in discrimination and badly miscalibrated risk (mean predicted 0.228 vs observed 0.019; Brier 0.101 vs 0.019), consistent with van den Goorbergh et al. (2022) and Carriero et al. (2024). Training is unweighted.
+
+**Validation decisions** (all made before touching the test set)
+- **Early warning is harder than detection at onset:** pre-onset AUPRC 0.046 (95% CI 0.038–0.057) vs 0.083 over all hours.
+- **Ordering features help mostly at/after onset:** +0.007 AUPRC over all hours but only +0.002 before onset (CIs overlap), i.e. largely echoing clinician suspicion. Kept in the main model; both models are compared at Hospital B, where ordering patterns differ.
+- **Threshold 0.05,** chosen by a rule fixed in advance: early-warn about half of septic patients.
 
 ## Leak found through error analysis
 SHAP on a false alarm (p008132, non-septic, 336 h stay) showed risk climbing steadily over two weeks, driven by "hours since last measured" values of 234–252 h. These features acted as a proxy for length of stay, which is confounded with the label in this dataset. Capping them at 24 h removed the proxy: main-model AUPRC fell from 0.089 to 0.083 (the honest estimate), this patient's peak risk fell from 0.72 to 0.44 and now tracks the fever that developed in week two, and a test prevents regressions.
@@ -83,6 +88,53 @@ SHAP on a false alarm (p008132, non-septic, 336 h stay) showed risk climbing ste
 | Before | After |
 |---|---|
 | ![](reports/figures/before_fix/cell4_2.png) | ![](reports/figures/after_fix/risk_p008132.png) |
+
+## Alert simulation
+Design choices, not challenge rules: an alert fires when risk ≥ threshold, then the patient's alerts are silenced for 6 h (following COMPOSER's alarm silencing). A septic patient counts as warned early if an alert fires within the 12 h before onset (the earliest point credited by the 2019 challenge utility score); lead time is the time from the first such alert to onset. Alerts for septic patients from 12 h before onset onward count as true alerts; all others, including alerts days before onset, count as false alarms. Alert burden is reported per 100 patient-days.
+
+## Test-set results (Hospital A, evaluated once)
+Final model: LightGBM (MLflow run `8eb22f64`). Threshold 0.05 chosen on validation. 95% CIs from 500 patient-level bootstrap resamples. 3,021 patients, 239 septic.
+
+**Discrimination**
+| Scope | AUROC | AUPRC | Random AUPRC |
+|---|---|---|---|
+| All hours | 0.805 (0.782–0.827) | 0.091 (0.075–0.112) | 0.020 |
+| Pre-onset hours (early warning) | 0.793 (0.767–0.816) | 0.054 (0.044–0.070) | 0.012 |
+
+All test metrics are within noise of validation (e.g. AUROC 0.809, early sensitivity 49.6%), indicating that model and threshold selection on validation did not overfit.
+
+**Alerting**
+| Threshold | Septic patients warned early | Median lead time | Alerts per 100 patient-days | Alert PPV | Non-septic patients alerted |
+|---|---|---|---|---|---|
+| 0.03 | 152 / 239 (64%) | 8 h | 70 | 9.9% | 28% |
+| **0.05** | **116 / 239 (49%)** | **8 h** | **39** | **13.2%** | **16%** |
+| 0.10 | 68 / 239 (28%) | 7.5 h | 15 | 17.4% | 6% |
+
+About 8 alerts per true early warning: roughly 4× better than chance and in the typical range for sepsis alerting tools (e.g. the Epic Sepsis Model's externally measured PPV of 12%; Wong et al., 2021; different setting, not a direct comparison).
+
+**Calibration:** mean predicted risk 1.65% vs observed 1.96% (Brier 0.019); mild underestimation in mid-range risk.
+
+![](reports/figures/test/calibration_test.png)
+
+**Subgroups** (threshold 0.05)
+| Group | Septic | AUROC (95% CI) | Early sensitivity | Non-septic alerted |
+|---|---|---|---|---|
+| Age < 50 | 51 | 0.833 (0.792–0.877) | 55% | 15% |
+| Age 50–64 | 70 | 0.788 (0.742–0.835) | 49% | 15% |
+| Age 65–79 | 80 | 0.812 (0.772–0.853) | 50% | 15% |
+| Age 80+ | 38 | 0.788 (0.737–0.834) | 37% | 20% |
+| Female | 114 | 0.784 (0.755–0.814) | 41% | 16% |
+| Male | 125 | 0.825 (0.794–0.859) | 55% | 16% |
+
+Lower early sensitivity for female patients (41% vs 55%) and for patients aged 80+ (37%, with more false alarms) are flagged as potential disparities. Subgroups are small; both are re-examined at Hospital B (919 septic patients).
+
+**Limitation: early-stay sepsis**
+| Onset timing | Septic patients | Warned early | Median lead |
+|---|---|---|---|
+| After first 24 h of record | 158 | 60% | 8 h |
+| Within first 24 h | 81 | 27% | 7.5 h |
+
+About a third of septic patients develop sepsis within their first day, and the model warns only about a quarter of them early, consistent with SHAP showing that limited history strongly lowers predicted risk.
 
 ## Reproduce
 1. Download the data:
@@ -93,16 +145,18 @@ SHAP on a false alarm (p008132, non-septic, 336 h stay) showed risk climbing ste
 5. `python -m src.features`
 6. Run tests: `python -m pytest -v`
 7. Train: `python -m src.train --model lgbm` (also `--model logreg`; ablations: `--with-iculos`, `--without-ordering`, `--class-weight`)
-8. View experiments: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
+8. Score a split with a trained run: `python -m src.predict --run-name lgbm --split test`
+9. View experiments: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 
 ## Project structure
-- `src/` — pipeline code (`columns.py`, `load_data.py`, `build_cohort.py`, `features.py`, `train.py`)
+- `src/` — pipeline code (`columns.py`, `load_data.py`, `build_cohort.py`, `features.py`, `train.py`, `predict.py`, `evaluate.py`)
 - `sql/` — cohort SQL; `sql/generated/features.sql` is the full feature query written by `src/features.py`
 - `tests/` — point-in-time and clock tests for the feature pipeline
-- `notebooks/` — exploration and checks (01–04), SHAP and error analysis (05)
+- `notebooks/` — exploration and checks (01–04), SHAP and error analysis (05), validation decisions (06), test-set evaluation (07)
 - `reports/figures/` — figures used in this README
 
 ## Next steps
+- Model for early-stay sepsis (onset within the first 24 h)
 - Survival analysis (time to sepsis) as a complementary model
 - Kubernetes deployment with autoscaling
 - Abstention ("indeterminate") output for out-of-distribution patients
@@ -121,3 +175,4 @@ SHAP on a false alarm (p008132, non-septic, 336 h stay) showed risk climbing ste
 - Shashikumar SP, et al. DeepAISE: an end-to-end development and deployment of a recurrent neural survival model for early prediction of sepsis. arXiv:1908.04759. 2019.
 - Singer M, Deutschman CS, Seymour CW, et al. The Third International Consensus Definitions for Sepsis and Septic Shock (Sepsis-3). *JAMA*. 2016;315(8):801–810.
 - van den Goorbergh R, van Smeden M, Timmerman D, Van Calster B. The harm of class imbalance corrections for risk prediction models: illustration and simulation using logistic regression. *J Am Med Inform Assoc*. 2022. arXiv:2202.09101.
+- Wong A, Otles E, Donnelly JP, et al. External validation of a widely implemented proprietary sepsis prediction model in hospitalized patients. *JAMA Intern Med*. 2021;181(8):1065–1070.
