@@ -2,13 +2,14 @@
 
 Predicting sepsis hours before onset from hourly ICU data, with external validation on a second hospital.
 
-*Work in progress: data pipeline, models and Hospital A test-set evaluation complete; external validation (Hospital B) and deployment in progress.*
+*Work in progress: Hospital A evaluation and Hospital B external validation complete; deployment in progress.*
 
 ## Highlights
 - **40,336 ICU patients** from two hospitals; reproducible pipeline: DuckDB SQL cohort and 148 point-in-time features, LightGBM, MLflow tracking, automated leakage tests.
 - **Held-out test set (Hospital A):** AUROC 0.805 (95% CI 0.782–0.827). At the chosen threshold, the model warns **49% of septic patients a median 8 hours before onset**, with about 8 alerts per true early warning.
+- **External validation at a second hospital:** AUROC 0.805 → 0.768; traced the loss of calibration to one site-specific measurement habit (FiO2 recording) with drift analysis and SHAP; local recalibration restored early-warning sensitivity.
 - **Found and removed two shortcuts** created by how the dataset was assembled: ICU length of stay (would inflate validation AUPRC by ~29%) and a hidden proxy for it in "hours since last measured" features, found through SHAP error analysis.
-- **Honest evaluation:** pre-onset performance reported separately from post-onset; subgroup results and an early-stay limitation reported; Hospital B held out entirely for external validation.
+- **Honest evaluation:** pre-onset performance reported separately from post-onset; subgroup results checked at both hospitals; early-stay limitation quantified.
 
 ## Data
 PhysioNet/Computing in Cardiology Challenge 2019 (v1.0.0): hourly ICU vitals, labs and demographics for 40,336 patients from two hospital systems (A: 20,336; B: 20,000). SepsisLabel follows Sepsis-3 and turns on 6 hours before onset.
@@ -37,7 +38,7 @@ PhysioNet/Computing in Cardiology Challenge 2019 (v1.0.0): hourly ICU vitals, la
 ## Known data artifacts
 - **Truncation:** septic records end 1–3 h after onset (~99% end 8–10 rows after the first label), so total record length is leakage.
 - **Length cap:** non-septic records rarely exceed 60 h (A: 6 of 18,546), while ~35% of septic records do. Rows after hour 60 are ~9× more likely to be positive at A (14.2% vs 1.5%). ICULOS is therefore excluded from the main model, and only fixed-window features are used.
-- **Hospital differences:** sepsis prevalence differs (7.9% vs 4.6% after exclusion), so lower PPV and a calibration shift are expected at B. Measurement patterns also differ: blood gases are nearly absent at B, EtCO2 is never measured at A, and DBP is missing 48% of hours at A vs 14% at B.
+- **Hospital differences:** sepsis prevalence differs (7.9% vs 4.6% after exclusion), and measurement patterns differ: blood gases are nearly absent at B, EtCO2 is never measured at A, and DBP is missing 48% of hours at A vs 14% at B. Their effect on the model is analyzed under *External validation*.
 - **Lab ordering** surges at onset, reflecting clinician suspicion rather than early warning; performance is therefore also evaluated on pre-onset hours.
 
 ## Features
@@ -79,7 +80,7 @@ PhysioNet/Computing in Cardiology Challenge 2019 (v1.0.0): hourly ICU vitals, la
 
 **Validation decisions** (all made before touching the test set)
 - **Early warning is harder than detection at onset:** pre-onset AUPRC 0.046 (95% CI 0.038–0.057) vs 0.083 over all hours.
-- **Ordering features help mostly at/after onset:** +0.007 AUPRC over all hours but only +0.002 before onset (CIs overlap), i.e. largely echoing clinician suspicion. Kept in the main model; both models are compared at Hospital B, where ordering patterns differ.
+- **Ordering features help mostly at/after onset:** +0.007 AUPRC over all hours but only +0.002 before onset (CIs overlap), i.e. largely echoing clinician suspicion. Kept in the main model; both models are compared at Hospital B.
 - **Threshold 0.05,** chosen by a rule fixed in advance: early-warn about half of septic patients.
 
 ## Leak found through error analysis
@@ -126,7 +127,7 @@ About 8 alerts per true early warning: roughly 4× better than chance and in the
 | Female | 114 | 0.784 (0.755–0.814) | 41% | 16% |
 | Male | 125 | 0.825 (0.794–0.859) | 55% | 16% |
 
-Lower early sensitivity for female patients (41% vs 55%) and for patients aged 80+ (37%, with more false alarms) are flagged as potential disparities. Subgroups are small; both are re-examined at Hospital B (919 septic patients).
+Lower early sensitivity for female patients (41% vs 55%) and for patients aged 80+ (37%, with more false alarms) were flagged as potential disparities; neither gap replicated at Hospital B (see *External validation*).
 
 **Limitation: early-stay sepsis**
 | Onset timing | Septic patients | Warned early | Median lead |
@@ -135,6 +136,41 @@ Lower early sensitivity for female patients (41% vs 55%) and for patients aged 8
 | Within first 24 h | 81 | 27% | 7.5 h |
 
 About a third of septic patients develop sepsis within their first day, and the model warns only about a quarter of them early, consistent with SHAP showing that limited history strongly lowers predicted risk.
+
+## External validation (Hospital B)
+The frozen model and threshold were applied to Hospital B (19,777 patients, 919 septic), which played no part in development.
+
+**Discrimination transfers, with a moderate drop**
+| | AUROC | AUPRC | Random AUPRC |
+|---|---|---|---|
+| A test, all hours | 0.805 (0.782–0.830) | 0.091 | 0.020 |
+| B, all hours | 0.768 (0.753–0.781) | 0.052 | 0.012 |
+| A test, pre-onset | 0.793 | 0.054 | 0.012 |
+| B, pre-onset | 0.749 (0.734–0.762) | 0.028 | 0.007 |
+
+AUPRC stays ~4× above chance at both hospitals. The model without ordering features performs the same at B (AUROC 0.771, AUPRC 0.048).
+
+**The threshold and calibration do not transfer.** At threshold 0.05, B gets a third as many alerts as A (13 vs 39 per 100 patient-days) and half the early warnings (25% vs 49% of septic patients). The model underestimates risk at B (mean predicted 0.87% vs observed 1.17%).
+
+![](reports/figures/external/calibration_A_vs_B.png)
+
+**Why: measurement habits, not patients.** The largest feature shifts are in how often tests are recorded (PTT missing 33% → 78%; FiO2 missing 42% → 71%) and in pre-ICU workflow (hospital time before ICU: median 2.6 → 9.0 h), while physiological values are similar. Decomposing the score shift with SHAP: B's mean log-odds are 0.377 lower, ~82% of it from FiO2 recording features. At A, a recent FiO2 measurement (oxygen support) strongly raised risk; at B it is often absent.
+
+**Local adaptation** (fit on a random half of B's patients, evaluated on the other half)
+| On B evaluation half | A's threshold, original scores | Recalibrated, local threshold 0.03 |
+|---|---|---|
+| Septic patients warned early | 25% | 52% |
+| Median lead time | 5 h | 7 h |
+| Alerts per 100 patient-days | 13 | 42 |
+| Alert PPV | 11.0% | 7.7% |
+
+Logistic recalibration (slope 0.96, intercept 0.10) fixes the scale (mean predicted 0.88% → 1.14% vs observed 1.21%) without changing ranking (AUROC 0.766). Re-choosing the threshold with the same rule restores early warning to A's level, at about 13 alerts per true early warning instead of ~8. Recovering precision would require retraining with B-like data or features less dependent on site-specific measurement habits.
+
+![](reports/figures/external/recalibration_B.png)
+
+**Subgroups and early-stay at B**
+- The sex gap seen on A's test set did not replicate at B (early sensitivity: female 26%, male 24%; AUROC 0.779 vs 0.759), and the age pattern was inconsistent across hospitals: no consistent subgroup disparity, with A's gaps most likely chance.
+- The early-stay limitation replicated: septic patients with onset within the first 24 h were warned early at less than half the rate of later onset (B: 12% vs 30%; A: 27% vs 60%).
 
 ## Reproduce
 1. Download the data:
@@ -145,24 +181,24 @@ About a third of septic patients develop sepsis within their first day, and the 
 5. `python -m src.features`
 6. Run tests: `python -m pytest -v`
 7. Train: `python -m src.train --model lgbm` (also `--model logreg`; ablations: `--with-iculos`, `--without-ordering`, `--class-weight`)
-8. Score a split with a trained run: `python -m src.predict --run-name lgbm --split test`
+8. Score a split with a trained run: `python -m src.predict --run-name lgbm --split test` (or `--split external`)
 9. View experiments: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 
 ## Project structure
 - `src/` — pipeline code (`columns.py`, `load_data.py`, `build_cohort.py`, `features.py`, `train.py`, `predict.py`, `evaluate.py`)
 - `sql/` — cohort SQL; `sql/generated/features.sql` is the full feature query written by `src/features.py`
 - `tests/` — point-in-time and clock tests for the feature pipeline
-- `notebooks/` — exploration and checks (01–04), SHAP and error analysis (05), validation decisions (06), test-set evaluation (07)
+- `notebooks/` — exploration and checks (01–04), SHAP and error analysis (05), validation decisions (06), test-set evaluation (07), external validation (08)
 - `reports/figures/` — figures used in this README
 
 ## Next steps
 - Model for early-stay sepsis (onset within the first 24 h)
+- Reduce dependence on site-specific measurement features (e.g. FiO2 recording) and retrain with multi-site data
 - Survival analysis (time to sepsis) as a complementary model
 - Kubernetes deployment with autoscaling
 - Abstention ("indeterminate") output for out-of-distribution patients
 - Decision curve analysis
 - Prediction logging to PostgreSQL for monitoring
-- Retraining on both hospitals
 
 ## References
 - Agniel D, Kohane IS, Weber GM. Biases in electronic health record data due to processes within the healthcare system: retrospective observational study. *BMJ*. 2018;361:k1479.
