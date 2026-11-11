@@ -1,4 +1,5 @@
 # Sepsis Early-Warning System
+![CI](https://github.com/Chamirti/sepsis-early-warning/actions/workflows/ci.yml/badge.svg)
 
 Predicting sepsis hours before onset from hourly ICU data, with external validation on a second hospital.
 
