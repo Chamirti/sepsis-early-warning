@@ -1,4 +1,6 @@
 """API tests: health check, valid prediction, input validation, and training/serving consistency."""
+from pathlib import Path
+
 import duckdb
 import numpy as np
 import pytest
@@ -6,10 +8,9 @@ from fastapi.testclient import TestClient
 
 from src.api import app
 from src.serving import SepsisScorer
-from src.train import DB_PATH
 
+DB_PATH = Path(__file__).resolve().parents[1] / "data" / "sepsis.duckdb"
 client = TestClient(app)
-
 EXAMPLE = {
     "patient_id": "test-001", "age": 67, "gender": 1, "unit": "MICU", "hosp_adm_time": -5,
     "observations": [
