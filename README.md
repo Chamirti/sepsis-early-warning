@@ -1,9 +1,9 @@
 # Sepsis Early-Warning System
 ![CI](https://github.com/Chamirti/sepsis-early-warning/actions/workflows/ci.yml/badge.svg)
 
-Predicting sepsis hours before onset from hourly ICU data, with external validation on a second hospital.
+Predicting sepsis hours before onset from hourly ICU data, with external validation on a second hospital, served as a containerized API that accepts plain JSON or FHIR R4.
 
-*Work in progress: Hospital A evaluation and Hospital B external validation complete; deployment in progress.*
+![API demo running on AWS](reports/figures/demo.gif)
 
 ## Highlights
 - **40,336 ICU patients** from two hospitals; reproducible pipeline: DuckDB SQL cohort and 148 point-in-time features, LightGBM, MLflow tracking, automated leakage tests.
@@ -11,6 +11,7 @@ Predicting sepsis hours before onset from hourly ICU data, with external validat
 - **External validation at a second hospital:** AUROC 0.805 → 0.768; traced the loss of calibration to one site-specific measurement habit (FiO2 recording) with drift analysis and SHAP; local recalibration restored early-warning sensitivity.
 - **Found and removed two shortcuts** created by how the dataset was assembled: ICU length of stay (would inflate validation AUPRC by ~29%) and a hidden proxy for it in "hours since last measured" features, found through SHAP error analysis.
 - **Honest evaluation:** pre-onset performance reported separately from post-onset; subgroup results checked at both hospitals; early-stay limitation quantified.
+- **Deployed:** FastAPI service with input validation, per-prediction SHAP explanations and a FHIR R4 endpoint (LOINC codes, UCUM unit checks); Docker image; GitHub Actions CI; run on AWS ECS Fargate. Serving reuses the training feature SQL, and a test confirms served predictions equal the training pipeline's. The same image gave identical predictions locally, in CI and on AWS.
 
 ## Data
 PhysioNet/Computing in Cardiology Challenge 2019 (v1.0.0): hourly ICU vitals, labs and demographics for 40,336 patients from two hospital systems (A: 20,336; B: 20,000). SepsisLabel follows Sepsis-3 and turns on 6 hours before onset.
@@ -173,6 +174,88 @@ Logistic recalibration (slope 0.96, intercept 0.10) fixes the scale (mean predic
 - The sex gap seen on A's test set did not replicate at B (early sensitivity: female 26%, male 24%; AUROC 0.779 vs 0.759), and the age pattern was inconsistent across hospitals: no consistent subgroup disparity, with A's gaps most likely chance.
 - The early-stay limitation replicated: septic patients with onset within the first 24 h were warned early at less than half the rate of later onset (B: 12% vs 30%; A: 27% vs 60%).
 
+## Serving API
+A FastAPI service (`src/api.py`) scores a patient's latest hour from their hourly history and explains the score. Interactive docs are at `/docs`.
+
+| Endpoint | Input | Returns |
+|---|---|---|
+| `GET /health` | – | Status and the model's MLflow run ID |
+| `POST /predict` | JSON: demographics + hourly observations | Risk, alert flag, top 5 reasons |
+| `POST /predict/fhir` | FHIR R4 Bundle (one Patient + Observations) | Same, plus the number of ignored observations |
+
+**Example request** (`POST /predict`):
+```json
+{
+  "patient_id": "test-001",
+  "age": 67,
+  "gender": 1,
+  "unit": "MICU",
+  "hosp_adm_time": -5,
+  "observations": [
+    {"ICULOS": 1, "HR": 88, "MAP": 80, "Resp": 18, "Temp": 37.1},
+    {"ICULOS": 2, "HR": 104, "MAP": 66, "Resp": 24, "Temp": 38.3, "labs": {"Lactate": 2.6}}
+  ]
+}
+```
+
+**Response** (abridged):
+```json
+{
+  "patient_id": "test-001",
+  "risk": 0.0179,
+  "alert": false,
+  "threshold": 0.05,
+  "hour": 2,
+  "top_reasons": [
+    {"feature": "hours_available24", "value": 2, "contribution": -1.114},
+    {"feature": "SBP_mean24", "value": null, "contribution": 0.301},
+    {"feature": "warning_criteria_count", "value": 3, "contribution": 0.221}
+  ],
+  "model_run_id": "8eb22f64550f4aaa813a9a521a0fc3f9"
+}
+```
+`contribution` is the feature's SHAP value in log-odds (LightGBM `pred_contrib`): positive values raise risk. Here, only 2 hours of history lowers risk most (the early-stay limitation above), while fever, tachycardia and fast breathing raise it.
+
+**FHIR endpoint:** `examples/fhir_bundle.json` is a sample Bundle.
+```
+curl -X POST http://localhost:8000/predict/fhir -H "Content-Type: application/json" -d @examples/fhir_bundle.json
+```
+- Observations are mapped by LOINC code (e.g. 8867-4 heart rate, 8310-5 body temperature, 8478-0 mean arterial pressure, 2524-7 lactate); codes the model doesn't use are skipped and counted in `ignored_observations`.
+- Units are checked against UCUM codes; a wrong unit is rejected (422), and °F is converted to °C.
+- Timestamps are bucketed into ICU hours from `icu_admission` (query parameter) or the earliest observation, and averaged within each hour. Age is computed from the Patient's birth date.
+
+**Input handling**
+- Requests are validated with Pydantic: physiologically impossible values, unknown labs, duplicate hours and empty histories are rejected with 422.
+- Missing vitals and labs are left missing, as in training.
+- `hosp_adm_time` was never missing in training; if omitted, it is filled with the Hospital A training median (−2.59 h).
+- **Training/serving consistency:** the API computes features with the same SQL generator used for training (`feature_sql`, run in an in-memory DuckDB), and `tests/test_api.py` checks that a real test patient's served risk equals the training pipeline's prediction.
+
+## Deployment
+- **Docker:** `python:3.12-slim` base, API-only pinned dependencies (`requirements-api.txt`), runs as a non-root user, with a container health check.
+- **CI** (GitHub Actions, `.github/workflows/ci.yml`): on every push, runs the test suite, then builds the image, starts it and checks `/health`. The training/serving test is skipped in CI because the data cannot be redistributed.
+- **AWS:** the image was pushed to ECR (scanned on push, immutable tags) and run on ECS Fargate (0.5 vCPU, 1 GB) with logs in CloudWatch and ECS health checks. The same requests returned identical predictions locally and on AWS. The service was recorded (demo above) and then shut down to avoid cost; `deploy/` contains the task definition to redeploy it.
+
+![ECS task running and healthy](reports/figures/ecs_running.png)
+
+**Deliberate demo-scale choices:** no load balancer (about $16/month even when idle), and the port is open only to a single IP instead of the internet. A production deployment would add an HTTPS load balancer, authentication, autoscaling and prediction logging.
+
+## Model card
+Following the structure of Mitchell et al. (2019).
+
+- **Model:** LightGBM binary classifier, MLflow run `8eb22f64550f4aaa813a9a521a0fc3f9`; 148 features; alert threshold 0.05.
+- **Intended use:** a research and portfolio prototype demonstrating an end-to-end clinical ML workflow: hourly risk of sepsis (Sepsis-3, label shifted 6 h before onset) for adult ICU patients, with explanations. **Not for clinical use**: not prospectively validated, not regulatory-cleared, and not evaluated against clinician judgment.
+- **Training data:** Hospital A (14,092 patients) from the PhysioNet 2019 Challenge; validation (3,020) for early stopping and threshold selection.
+- **Evaluation data:** Hospital A held-out test (3,021 patients) and Hospital B external (19,777 patients). See the results above.
+- **Key metrics:** AUROC 0.805 (A test), 0.768 (B). At threshold 0.05 on A: 49% of septic patients warned early (median 8 h), alert PPV 13.2%, 39 alerts per 100 patient-days.
+- **Factors evaluated:** hospital, age group, sex, onset timing. No consistent subgroup disparity across hospitals; early-stay sepsis is detected much less often at both.
+- **Limitations and risks:**
+  - Sepsis that develops in the first 24 h is detected at less than half the rate of later onset.
+  - Calibration and the threshold do not transfer between hospitals; local recalibration and threshold selection are needed before any use at a new site.
+  - The model partly learns site-specific measurement habits (e.g. FiO2 recording) and clinician ordering behavior, not only patient physiology.
+  - Labels are retrospective and inherit the dataset's artifacts (record truncation and length caps), which were mitigated but may not be fully removed.
+  - About 7 of 8 alerts are false at A; alert fatigue would need to be evaluated with clinicians.
+  - Predictions with little history or many missing inputs are less reliable, and the API does not yet flag them.
+
 ## Reproduce
 1. Download the data:
    `aws s3 sync --no-sign-request s3://physionet-open/challenge-2019/1.0.0/training/ data/raw/`
@@ -184,22 +267,32 @@ Logistic recalibration (slope 0.96, intercept 0.10) fixes the scale (mean predic
 7. Train: `python -m src.train --model lgbm` (also `--model logreg`; ablations: `--with-iculos`, `--without-ordering`, `--class-weight`)
 8. Score a split with a trained run: `python -m src.predict --run-name lgbm --split test` (or `--split external`)
 9. View experiments: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
+10. Export the final model for serving: `python -m src.export_model` (writes `models/model.txt` and `models/metadata.json`)
+11. Run the API locally: `uvicorn src.api:app --reload`, then open http://localhost:8000/docs
+12. Or with Docker: `docker build -t sepsis-api .` then `docker run --rm -p 8000:8000 sepsis-api`
+
+The API and its tests need only `requirements-api.txt` / `requirements-dev.txt` and the exported model in `models/`, not the data.
 
 ## Project structure
-- `src/` — pipeline code (`columns.py`, `load_data.py`, `build_cohort.py`, `features.py`, `train.py`, `predict.py`, `evaluate.py`)
+- `src/` — pipeline code (`columns.py`, `load_data.py`, `build_cohort.py`, `features.py`, `train.py`, `predict.py`, `evaluate.py`, `export_model.py`) and serving code (`api.py`, `serving.py`, `schemas.py`, `fhir.py`)
 - `sql/` — cohort SQL; `sql/generated/features.sql` is the full feature query written by `src/features.py`
-- `tests/` — point-in-time and clock tests for the feature pipeline
+- `tests/` — feature-pipeline tests (point-in-time, clock), API tests (validation, training/serving consistency) and FHIR tests
+- `models/` — exported LightGBM model and metadata used by the API
+- `examples/` — sample FHIR Bundle
+- `deploy/` — ECS Fargate task definition and role trust policy
 - `notebooks/` — exploration and checks (01–04), SHAP and error analysis (05), validation decisions (06), test-set evaluation (07), external validation (08)
 - `reports/figures/` — figures used in this README
+- `Dockerfile`, `.github/workflows/ci.yml` — container image and CI
 
 ## Next steps
 - Model for early-stay sepsis (onset within the first 24 h)
 - Reduce dependence on site-specific measurement features (e.g. FiO2 recording) and retrain with multi-site data
-- Survival analysis (time to sepsis) as a complementary model
-- Kubernetes deployment with autoscaling
+- Return warnings when inputs are missing or imputed
 - Abstention ("indeterminate") output for out-of-distribution patients
+- Survival analysis (time to sepsis) as a complementary model
 - Decision curve analysis
-- Prediction logging to PostgreSQL for monitoring
+- Production deployment: HTTPS load balancer, authentication, Kubernetes with autoscaling
+- Prediction logging to PostgreSQL for drift monitoring
 
 ## References
 - Agniel D, Kohane IS, Weber GM. Biases in electronic health record data due to processes within the healthcare system: retrospective observational study. *BMJ*. 2018;361:k1479.
@@ -207,6 +300,7 @@ Logistic recalibration (slope 0.96, intercept 0.10) fixes the scale (mean predic
 - Carriero A, Luijken K, de Hond A, Moons KGM, van Calster B, van Smeden M. The harms of class imbalance corrections for machine learning based prediction models: a simulation study. arXiv:2404.19494. 2024.
 - Evans L, Rhodes A, Alhazzani W, et al. Surviving Sepsis Campaign: international guidelines for management of sepsis and septic shock 2021. *Crit Care Med*. 2021;49(11):e1063–e1143.
 - Jouffroy R, et al. Prehospital shock index to assess 28-day mortality for septic shock. *Am J Emerg Med*. 2019. doi:10.1016/j.ajem.2019.11.004
+- Mitchell M, Wu S, Zaldivar A, et al. Model cards for model reporting. *Proceedings of the Conference on Fairness, Accountability, and Transparency (FAT\*)*. 2019:220–229.
 - Moor M, et al. Predicting sepsis in multi-site, multi-national intensive care cohorts using deep learning. arXiv:2107.05230. 2021.
 - Reyna MA, Josef CS, Jeter R, et al. Early prediction of sepsis from clinical data: the PhysioNet/Computing in Cardiology Challenge 2019. *Crit Care Med*. 2020;48(2):210–217.
 - Shashikumar SP, et al. DeepAISE: an end-to-end development and deployment of a recurrent neural survival model for early prediction of sepsis. arXiv:1908.04759. 2019.
