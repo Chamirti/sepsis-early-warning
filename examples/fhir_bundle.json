@@ -1,6 +1,6 @@
 {
   "patient_id": "fhir-001",
-  "risk": 0.005248237041741855,
+  "risk": 0.005153967990313617,
   "alert": false,
   "threshold": 0.05,
   "hour": 2,
@@ -8,27 +8,27 @@
     {
       "feature": "hours_available24",
       "value": 2,
-      "contribution": -1.184
+      "contribution": -1.125
     },
     {
       "feature": "Resp_mean24",
       "value": null,
-      "contribution": -0.574
+      "contribution": -0.562
     },
     {
       "feature": "warning_criteria_count",
       "value": 2,
-      "contribution": 0.31
+      "contribution": 0.313
     },
     {
       "feature": "SBP_mean24",
       "value": null,
-      "contribution": 0.266
+      "contribution": 0.263
     },
     {
-      "feature": "Temp_last",
+      "feature": "Temp_max6",
       "value": 38.333,
-      "contribution": 0.242
+      "contribution": 0.261
     }
   ],
   "model_run_id": "8eb22f64550f4aaa813a9a521a0fc3f9",
